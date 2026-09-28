@@ -16,6 +16,8 @@ export interface KV {
   srem(key: string, member: string): Promise<number>;
   sismember(key: string, member: string): Promise<boolean>;
   scard(key: string): Promise<number>;
+  /** Membership of many values in one round trip. */
+  smismember(key: string, members: string[]): Promise<boolean[]>;
   spop(key: string): Promise<string | null>;
   hset(key: string, field: string, value: string): Promise<void>;
   hget(key: string, field: string): Promise<string | null>;
@@ -60,6 +62,11 @@ class UpstashKV implements KV {
   }
   scard(key: string) {
     return this.r.scard(key);
+  }
+  async smismember(key: string, members: string[]) {
+    if (!members.length) return [];
+    const res = await this.r.smismember(key, members);
+    return res.map((v) => v === 1);
   }
   async spop(key: string) {
     const res = await this.r.spop<string>(key);
@@ -142,6 +149,10 @@ class MemoryKV implements KV {
   }
   async scard(key: string) {
     return this.setOf(key)?.size ?? 0;
+  }
+  async smismember(key: string, members: string[]) {
+    const s = this.setOf(key);
+    return members.map((m) => s?.has(m) ?? false);
   }
   async spop(key: string) {
     const s = this.setOf(key);

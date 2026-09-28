@@ -37,5 +37,6 @@ export default async function PlayRoomPage({ params }: { params: Promise<{ code:
   }
   if (state.host.id === user.id) redirect(`/host/${code}`);
 
-  return <ViewerView initial={state} initialMe={await getMe(code, user)} token={roomSocketToken(code)} />;
+  // The token names the user, so the worker can tell the host who is actually on the page.
+  return <ViewerView initial={state} initialMe={await getMe(code, user, state)} token={roomSocketToken(code, user.id)} />;
 }

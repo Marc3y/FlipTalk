@@ -168,6 +168,14 @@ export function HostView({ initial, token, devTools }: { initial: RoomState; tok
                       <span className="size-2.5 animate-pulse rounded-full bg-rose-500" />
                       {t("host.recordingClip")} <SecondsSince since={room.pickedAt} />
                     </p>
+                    <NoResponse
+                      since={room.pickedAt}
+                      onSkip={() => {
+                        stopAudio();
+                        void act("skip");
+                      }}
+                      loading={busy === "skip"}
+                    />
                   </Stage>
                 )}
 
@@ -248,6 +256,30 @@ function Stage({ children }: { children: React.ReactNode }) {
       className="flex w-full flex-col items-center"
     >
       {children}
+    </motion.div>
+  );
+}
+
+const NO_RESPONSE_AFTER_MS = 45_000;
+
+/** After 45 s without a clip, offer the obvious way out right where the streamer is looking. */
+function NoResponse({ since, onSkip, loading }: { since: number | null; onSkip: () => void; loading: boolean }) {
+  const { t } = useI18n();
+  const [late, setLate] = useState(false);
+  useEffect(() => {
+    if (!since) return;
+    const wait = since + NO_RESPONSE_AFTER_MS - Date.now();
+    if (wait <= 0) return setLate(true);
+    const id = setTimeout(() => setLate(true), wait);
+    return () => clearTimeout(id);
+  }, [since]);
+  if (!late) return null;
+  return (
+    <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="mt-8 flex flex-col items-center gap-3">
+      <p className="text-sm text-white/60">{t("host.noResponse")}</p>
+      <Button size="lg" onClick={onSkip} loading={loading}>
+        <SkipForward className="size-5" /> {t("host.skip")}
+      </Button>
     </motion.div>
   );
 }

@@ -46,12 +46,37 @@ export async function publishRoomState(state: RoomState) {
   // State is already saved in Redis; clients resync on their next reconnect or page load.
 }
 
-/** Short-lived signed ticket that lets a browser open a socket to one room. Null when not using PartyServer. */
-export function roomSocketToken(code: string): string | null {
+/**
+ * Signed ticket that lets a browser open a socket to one room. For signed-in viewers it also names
+ * the user, which is how the worker knows who is online. Null when not using PartyServer.
+ * Format must match verifyToken() in party/src/index.ts.
+ */
+export function roomSocketToken(code: string, userId?: string): string | null {
   if (!partyConfig) return null;
   const exp = Date.now() + TOKEN_TTL_MS;
-  const sig = createHmac("sha256", partyConfig.secret).update(`${code}:${exp}`).digest("base64url");
-  return `${exp}.${sig}`;
+  const uid = userId ?? "";
+  const sig = createHmac("sha256", partyConfig.secret).update(`${code}:${exp}:${uid}`).digest("base64url");
+  return `${exp}.${Buffer.from(uid).toString("base64url")}.${sig}`;
+}
+
+/**
+ * Signed-in users who have the room page open right now, according to the worker.
+ * Null when there is no worker (local dev) or it can't be reached: callers then treat everyone as present.
+ */
+export async function onlineUsers(code: string): Promise<string[] | null> {
+  if (!partyConfig) return null;
+  try {
+    const res = await fetch(partyUrl(code), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${partyConfig.secret}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ presence: true }),
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) return null;
+    return ((await res.json()) as { online: string[] }).online;
+  } catch {
+    return null;
+  }
 }
 
 /** Local-mode only: used by the SSE route during `npm run dev`. */

@@ -1,4 +1,4 @@
-import { routePartykitRequest, Server, type Connection } from "partyserver";
+import { routePartykitRequest, Server, type Connection, type ConnectionContext } from "partyserver";
 
 declare global {
   namespace Cloudflare {
@@ -15,9 +15,13 @@ const ROOM_NAME = /^[A-Z2-9]{5}$/;
 /** Forget a room's state after this long without updates. */
 const IDLE_TTL_MS = 13 * 60 * 60 * 1000;
 
+type ConnState = { uid: string | null };
+
 /**
- * Pure fan-out relay. The Next.js API (the source of truth, backed by Redis) POSTs every new room
- * state here; this object stores the latest one and pushes it to every connected viewer.
+ * Fan-out relay and presence tracker. The Next.js API (the source of truth, backed by Redis) POSTs
+ * every new room state here; this object stores the latest one and pushes it to every connected viewer.
+ * It also knows which signed-in viewers have the page open right now, so picks only land on people
+ * who are actually there.
  *
  * Hibernation means idle sockets cost nothing: the object only wakes up to broadcast or accept a
  * connection. Viewers never send messages, so there is no per-viewer inbound traffic either.
@@ -25,10 +29,22 @@ const IDLE_TTL_MS = 13 * 60 * 60 * 1000;
 export class Room extends Server<Env> {
   static options = { hibernate: true };
 
-  async onConnect(connection: Connection) {
+  async onConnect(connection: Connection<ConnState>, ctx: ConnectionContext) {
+    // The worker already verified the token; here we only read which user it was issued to.
+    // setState survives hibernation (it's stored on the socket).
+    connection.setState({ uid: tokenUser(new URL(ctx.request.url).searchParams.get("token")) });
     // Late joiners and reconnects get the current state straight away, without hitting Vercel.
     const state = await this.ctx.storage.get<string>("state");
     if (state) connection.send(state);
+  }
+
+  /** Distinct signed-in users with at least one open connection. */
+  private onlineUsers() {
+    const ids = new Set<string>();
+    for (const conn of this.getConnections<ConnState>()) {
+      if (conn.state?.uid) ids.add(conn.state.uid);
+    }
+    return [...ids];
   }
 
   onMessage() {
@@ -38,12 +54,13 @@ export class Room extends Server<Env> {
   async onRequest(request: Request) {
     if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
     const body = await request.text();
-    let next: { version?: unknown; phase?: unknown };
+    let next: { version?: unknown; phase?: unknown; presence?: unknown };
     try {
       next = JSON.parse(body);
     } catch {
       return new Response("Bad JSON", { status: 400 });
     }
+    if (next.presence === true) return Response.json({ online: this.onlineUsers() });
     if (typeof next.version !== "number") return new Response("Missing version", { status: 400 });
 
     // Requests can arrive out of order; never replace newer state with older.
@@ -81,15 +98,25 @@ function fromBase64Url(s: string) {
   return Uint8Array.from(bin, (c) => c.charCodeAt(0));
 }
 
-/** Token format `<expiresAtMs>.<base64url HMAC-SHA256("<room>:<expiresAtMs>")>`, issued by the Next.js app. */
+/**
+ * Token format `<expiresAtMs>.<base64url user id, empty for host/overlay>.<base64url HMAC-SHA256("<room>:<exp>:<uid>")>`,
+ * issued by the Next.js app. Must stay in sync with roomSocketToken() in src/lib/server/realtime.ts.
+ */
 async function verifyToken(secret: string, room: string, token: string | null) {
-  const [exp, sig] = token?.split(".") ?? [];
-  if (!exp || !sig || !(Number(exp) > Date.now())) return false;
+  const [exp, uid, sig] = token?.split(".") ?? [];
+  if (!exp || uid === undefined || !sig || !(Number(exp) > Date.now())) return false;
   try {
-    return await crypto.subtle.verify("HMAC", await hmacKey(secret), fromBase64Url(sig), encoder.encode(`${room}:${exp}`));
+    const payload = `${room}:${exp}:${uid ? new TextDecoder().decode(fromBase64Url(uid)) : ""}`;
+    return await crypto.subtle.verify("HMAC", await hmacKey(secret), fromBase64Url(sig), encoder.encode(payload));
   } catch {
     return false;
   }
+}
+
+/** User id embedded in an already-verified token. */
+function tokenUser(token: string | null) {
+  const uid = token?.split(".")[1];
+  return uid ? new TextDecoder().decode(fromBase64Url(uid)) : null;
 }
 
 function sameSecret(a: string, b: string) {

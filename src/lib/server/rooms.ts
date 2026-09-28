@@ -1,4 +1,5 @@
 import "server-only";
+import { after } from "next/server";
 import {
   CLIP_SAMPLE_RATE,
   MAX_CLIP_SECONDS,
@@ -11,7 +12,7 @@ import type { MeState, PublicPlayer, RoomState, Verdict } from "@/lib/types";
 import type { MessageKey, MessageParams } from "@/lib/i18n/messages";
 import { parseWav } from "@/lib/wav";
 import { kv } from "./kv";
-import { publishRoomState } from "./realtime";
+import { onlineUsers, publishRoomState } from "./realtime";
 
 const ROOM_TTL = 60 * 60 * 12;
 const CLIP_TTL = 60 * 15;
@@ -26,6 +27,7 @@ const keys = {
   profiles: (c: string) => `room:${c}:profiles`,
   banned: (c: string) => `room:${c}:banned`,
   countLock: (c: string) => `room:${c}:countlock`,
+  countTrail: (c: string) => `room:${c}:counttrail`,
   clip: (c: string, id: string) => `clip:${c}:${id}`,
 };
 
@@ -108,32 +110,48 @@ export async function getRoomState(code: string): Promise<RoomState | null> {
   return current ? withCount(current.room) : null;
 }
 
-export async function getMe(code: string, user: PublicPlayer | null): Promise<MeState> {
-  const current = await readRoom(code);
-  if (!user || !current) return { user, isHost: false, joined: false, banned: false };
+/** Pass `room` when the caller already loaded it, to save a Redis read per page view. */
+export async function getMe(code: string, user: PublicPlayer | null, room?: RoomState | null): Promise<MeState> {
+  const host = room ? room.host : (await readRoom(code))?.room.host;
+  if (!user || !host) return { user, isHost: false, joined: false, banned: false };
   const [joined, banned] = await Promise.all([
     kv.sismember(keys.pool(code), user.id),
     kv.sismember(keys.banned(code), user.id),
   ]);
-  return { user, isHost: current.room.host.id === user.id, joined, banned };
+  return { user, isHost: host.id === user.id, joined, banned };
 }
 
-/** Joins/leaves change only the count, so they never rewrite the room, and broadcasts are throttled. */
-async function broadcastCountThrottled(code: string) {
-  if (!(await kv.set(keys.countLock(code), "1", { px: COUNT_BROADCAST_MS, nx: true }))) return;
+async function broadcastCount(code: string) {
   const current = await readRoom(code);
-  if (current) await broadcast(current.room);
+  if (!current) return;
+  // Lobby keys get their TTL refreshed here (at most every 2 s) instead of on every join.
+  await Promise.all([kv.expire(keys.pool(code), ROOM_TTL), kv.expire(keys.profiles(code), ROOM_TTL), broadcast(current.room)]);
+}
+
+/**
+ * Joins/leaves change only the count, so they never rewrite the room, and broadcasts are throttled:
+ * the first join in a 2 s window broadcasts right away, and exactly one later join in that window
+ * schedules a final broadcast for when it ends. A rush of 2,000 joins costs ~1 broadcast per second,
+ * and the count everyone sees is exact once the rush is over.
+ */
+async function broadcastCountThrottled(code: string) {
+  if (await kv.set(keys.countLock(code), "1", { px: COUNT_BROADCAST_MS, nx: true })) {
+    await broadcastCount(code);
+  } else if (await kv.set(keys.countTrail(code), "1", { px: COUNT_BROADCAST_MS, nx: true })) {
+    after(async () => {
+      await new Promise((r) => setTimeout(r, COUNT_BROADCAST_MS));
+      await broadcastCount(code);
+    });
+  }
 }
 
 export async function joinRoom(code: string, user: PublicPlayer) {
-  const current = await readRoom(code);
+  const [current, banned] = await Promise.all([readRoom(code), kv.sismember(keys.banned(code), user.id)]);
   if (!current || current.room.phase === "closed") throw new RoomError(404, "err.notFound");
   if (current.room.host.id === user.id) throw new RoomError(400, "err.youHost");
-  if (await kv.sismember(keys.banned(code), user.id)) throw new RoomError(403, "err.banned");
+  if (banned) throw new RoomError(403, "err.banned");
 
-  await kv.hset(keys.profiles(code), user.id, JSON.stringify(user));
-  const added = await kv.sadd(keys.pool(code), user.id);
-  await Promise.all([kv.expire(keys.pool(code), ROOM_TTL), kv.expire(keys.profiles(code), ROOM_TTL)]);
+  const [, added] = await Promise.all([kv.hset(keys.profiles(code), user.id, JSON.stringify(user)), kv.sadd(keys.pool(code), user.id)]);
   if (added) await broadcastCountThrottled(code);
 }
 
@@ -145,9 +163,7 @@ export async function pickPlayer(code: string, hostId: string) {
   const room = await requireHost(code, hostId);
   if (room.phase !== "lobby") throw new RoomError(409, "err.finishRound");
 
-  // SPOP is atomic, so double clicks can never pick the same viewer twice.
-  const id = await kv.spop(keys.pool(code));
-  if (!id) throw new RoomError(409, "err.emptyLobby");
+  const id = await claimPresentPlayer(code);
   const profile = await kv.hget(keys.profiles(code), id);
   const player: PublicPlayer = profile ? JSON.parse(profile) : { id, name: "Viewer", image: null };
 
@@ -160,6 +176,32 @@ export async function pickPlayer(code: string, hostId: string) {
     await kv.sadd(keys.pool(code), id); // put them back, they never got their turn
     throw err;
   }
+}
+
+/**
+ * Takes one random viewer out of the lobby, preferring people who have the page open right now
+ * (the worker tracks their sockets). Whoever joined and closed the tab stays in the lobby and can
+ * still be picked later if they come back. Removal is atomic (SREM/SPOP), so a double click can
+ * never pick the same viewer twice.
+ */
+async function claimPresentPlayer(code: string): Promise<string> {
+  const online = await onlineUsers(code);
+  if (online === null) {
+    // No presence info (local dev, or the worker is unreachable): anyone from the lobby.
+    const id = await kv.spop(keys.pool(code));
+    if (!id) throw new RoomError(409, "err.emptyLobby");
+    return id;
+  }
+  const inLobby = await kv.smismember(keys.pool(code), online);
+  const candidates = online.filter((_, i) => inLobby[i]);
+  for (let i = candidates.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+  }
+  for (const id of candidates) {
+    if (await kv.srem(keys.pool(code), id)) return id;
+  }
+  throw new RoomError(409, (await kv.scard(keys.pool(code))) ? "err.nobodyOnline" : "err.emptyLobby");
 }
 
 export async function skipPlayer(code: string, hostId: string, ban: boolean) {

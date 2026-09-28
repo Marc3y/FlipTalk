@@ -40,6 +40,12 @@ export function Visualizer({
       if (analyser && data) analyser.getByteFrequencyData(data);
       const gap = Math.max(2, w / bars / 4);
       const bw = (w - gap * (bars - 1)) / bars;
+      // During layout animations the canvas can briefly be too narrow for any bar; skip that frame
+      // (roundRect throws on a negative radius, which would kill the animation loop).
+      if (bw <= 0 || h <= 0) {
+        raf = requestAnimationFrame(draw);
+        return;
+      }
 
       for (let i = 0; i < bars; i++) {
         // Mirror around the centre so it reads as a waveform, not a spectrum analyser.
