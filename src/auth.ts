@@ -6,10 +6,17 @@ import { hasTwitch, isMockAuth, isProd } from "@/lib/server/env";
 
 const providers: Provider[] = [];
 
-// Reads AUTH_TWITCH_ID / AUTH_TWITCH_SECRET automatically. Only the `openid` scope: we need the
-// Twitch id, display name and avatar, not the email the provider asks for by default.
+// Reads AUTH_TWITCH_ID / AUTH_TWITCH_SECRET automatically. We only need the Twitch id, display name
+// and avatar, so no `user:read:email` scope. The `claims` must drop `email` too: Twitch rejects the
+// login if email is requested without that scope. Auth.js deep-merges provider options into the
+// defaults (which would keep `email`), so the defaults themselves are replaced here.
 if (hasTwitch && !isMockAuth) {
-  providers.push(Twitch({ authorization: { params: { scope: "openid" } } }));
+  providers.push({
+    ...Twitch({}),
+    authorization: {
+      params: { scope: "openid", claims: { id_token: { picture: null, preferred_username: null } } },
+    },
+  });
 }
 
 if (isMockAuth) {
@@ -33,7 +40,13 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   // A fixed secret is fine locally; production must set AUTH_SECRET (Auth.js refuses to start otherwise).
   secret: process.env.AUTH_SECRET || (isProd ? undefined : "fliptalk-local-dev-secret-do-not-use-in-prod"),
   trustHost: true,
-  pages: { signIn: "/" },
+  pages: { signIn: "/", error: "/" },
+  logger: {
+    // Keep the provider's actual reason (e.g. Twitch's error_description) in the Vercel logs.
+    error(error) {
+      console.error(`[auth][error] ${error.name}: ${error.message}`, (error as Error & { cause?: unknown }).cause ?? "");
+    },
+  },
   callbacks: {
     jwt({ token, user, account }) {
       if (account && user) {

@@ -12,8 +12,8 @@ const steps = [
   { icon: Repeat2, title: "home.step3Title", body: "home.step3Body" },
 ] as const;
 
-export default async function Home() {
-  const [user, { t }] = await Promise.all([currentUser(), getI18n()]);
+export default async function Home({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
+  const [user, { t }, { error }] = await Promise.all([currentUser(), getI18n(), searchParams]);
   return (
     <main className="app-bg min-h-dvh">
       <div className="mx-auto flex max-w-5xl flex-col px-4 pb-16 pt-6 sm:px-6">
@@ -24,6 +24,13 @@ export default async function Home() {
             {user && <UserBadge user={user} />}
           </div>
         </header>
+
+        {/* Auth.js sends failed sign-ins back here with ?error=… */}
+        {error && (
+          <p role="alert" className="mx-auto mt-8 max-w-md rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-center text-sm text-rose-200">
+            {t("home.authError")}
+          </p>
+        )}
 
         <section className="mt-16 text-center sm:mt-24">
           <p className="mx-auto inline-flex items-center gap-2 rounded-full border border-neon-500/30 bg-neon-500/10 px-3 py-1 text-xs font-medium text-neon-300">

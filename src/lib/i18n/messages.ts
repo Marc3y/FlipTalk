@@ -6,6 +6,7 @@ const de = {
   "lang.label": "Sprache",
 
   "home.badge": "Für Livestreams gebaut",
+  "home.authError": "Die Anmeldung mit Twitch hat nicht geklappt. Versuch es bitte nochmal.",
   "home.titleA": "Sag es",
   "home.titleB": "rückwärts.",
   "home.subtitle":
@@ -193,6 +194,7 @@ const en: Record<MessageKey, string> = {
   "lang.label": "Language",
 
   "home.badge": "Built for live streams",
+  "home.authError": "Signing in with Twitch didn't work. Please try again.",
   "home.titleA": "Say it",
   "home.titleB": "backwards.",
   "home.subtitle": "The Reverse Voice Challenge for you and your chat. Thousands of viewers can queue up, and one of them gets to stump you.",
