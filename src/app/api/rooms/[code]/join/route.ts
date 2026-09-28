@@ -6,6 +6,7 @@ export const POST = handler(async (req, ctx: CodeParams) => {
   const code = await roomCode(ctx);
   const user = await requireUser();
   await enforceLimit("join", req, user.id);
-  await joinRoom(code, user);
+  const body = (await req.json().catch(() => null)) as { mic?: unknown } | null;
+  await joinRoom(code, user, body?.mic === true);
   return NextResponse.json({ ok: true });
 });

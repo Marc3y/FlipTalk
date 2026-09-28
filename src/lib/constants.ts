@@ -7,6 +7,15 @@ export const MIN_CLIP_SECONDS = 0.3;
 export const CLIP_SAMPLE_RATE = 22050;
 export const MAX_UPLOAD_BYTES = 500 * 1024;
 
+/** Players per room (people holding a slot, not viewers of the stream). */
+export const MAX_PLAYERS_LIMIT = 50;
+export const DEFAULT_MAX_PLAYERS = 25;
+
+export function clampMaxPlayers(value: unknown) {
+  const n = Math.round(Number(value));
+  return Number.isFinite(n) ? Math.min(MAX_PLAYERS_LIMIT, Math.max(1, n)) : DEFAULT_MAX_PLAYERS;
+}
+
 export const ROOM_CODE_LENGTH = 5;
 /** No 0/O, 1/I/L so codes are readable on stream. */
 export const ROOM_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";

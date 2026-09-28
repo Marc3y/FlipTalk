@@ -5,23 +5,19 @@ import { formatNumber, LANG_COOKIE, translate, type Lang, type MessageKey, type 
 
 const I18nContext = createContext<{ lang: Lang; setLang: (lang: Lang) => void } | null>(null);
 
-/**
- * The server passes the language from the cookie, so the first render is already translated.
- * `fixed` is for pages like the OBS overlay whose language comes from the URL instead.
- */
-export function I18nProvider({ lang: initial, fixed, children }: { lang: Lang; fixed?: boolean; children: React.ReactNode }) {
+/** The server passes the language from the cookie, so the first render is already translated. */
+export function I18nProvider({ lang: initial, children }: { lang: Lang; children: React.ReactNode }) {
   const router = useRouter();
   const [lang, setLangState] = useState(initial);
 
   const setLang = useCallback(
     (next: Lang) => {
-      if (fixed) return;
       document.cookie = `${LANG_COOKIE}=${next}; path=/; max-age=31536000; samesite=lax`;
       document.documentElement.lang = next;
       setLangState(next);
       router.refresh(); // re-render server components in the new language
     },
-    [fixed, router],
+    [router],
   );
 
   const value = useMemo(() => ({ lang, setLang }), [lang, setLang]);

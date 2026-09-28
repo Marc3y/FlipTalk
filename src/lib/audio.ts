@@ -3,6 +3,11 @@ import { CLIP_SAMPLE_RATE, MAX_CLIP_SECONDS } from "./constants";
 import { encodeWav } from "./wav";
 
 let ctx: AudioContext | null = null;
+let master: GainNode | null = null;
+
+const VOLUME_KEY = "fliptalk:volume";
+/** Slider position 0..1. Clips are normalized to near full scale, so full volume is really loud. */
+export const DEFAULT_VOLUME = 0.6;
 
 /**
  * One shared AudioContext. Call this from a click handler at least once so browsers
@@ -12,6 +17,38 @@ export function getAudioContext() {
   ctx ??= new AudioContext();
   if (ctx.state === "suspended") void ctx.resume();
   return ctx;
+}
+
+/** Everything audible connects here instead of `ctx.destination`, so one slider controls it all. */
+export function getOutput() {
+  const c = getAudioContext();
+  if (!master) {
+    master = c.createGain();
+    master.gain.value = sliderToGain(getVolume());
+    master.connect(c.destination);
+  }
+  return master;
+}
+
+// Loudness is perceived roughly logarithmically; a squared curve makes the slider feel even.
+const sliderToGain = (v: number) => v * v;
+
+export function getVolume() {
+  try {
+    const stored = Number(localStorage.getItem(VOLUME_KEY));
+    return localStorage.getItem(VOLUME_KEY) !== null && stored >= 0 && stored <= 1 ? stored : DEFAULT_VOLUME;
+  } catch {
+    return DEFAULT_VOLUME;
+  }
+}
+
+export function setVolume(v: number) {
+  const value = Math.min(1, Math.max(0, v));
+  try {
+    localStorage.setItem(VOLUME_KEY, String(value));
+  } catch {}
+  // Short ramp avoids clicks while dragging.
+  if (master && ctx) master.gain.setTargetAtTime(sliderToGain(value), ctx.currentTime, 0.02);
 }
 
 /** False until a user gesture has resumed the context (browsers block sound before that). */

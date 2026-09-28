@@ -1,5 +1,5 @@
 "use client";
-import { getAudioContext } from "./audio";
+import { getAudioContext, getOutput } from "./audio";
 
 const CHIMES = {
   /** Picked viewer: bright rising arpeggio, played twice so it cuts through a stream in another tab. */
@@ -25,7 +25,7 @@ export function playChime(kind: keyof typeof CHIMES) {
       env.gain.setValueAtTime(0.0001, t);
       env.gain.exponentialRampToValueAtTime(gain, t + 0.02);
       env.gain.exponentialRampToValueAtTime(0.0001, t + 0.5);
-      osc.connect(env).connect(ctx.destination);
+      osc.connect(env).connect(getOutput());
       osc.start(t);
       osc.stop(t + 0.55);
     });

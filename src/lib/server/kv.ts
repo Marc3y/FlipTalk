@@ -22,9 +22,29 @@ export interface KV {
   hset(key: string, field: string, value: string): Promise<void>;
   hget(key: string, field: string): Promise<string | null>;
   hdel(key: string, field: string): Promise<void>;
+  /**
+   * Room admission in one atomic step: existing members go (back) into the pool; newcomers only if
+   * the member set has fewer than `max` entries. 2,000 simultaneous joins can't overshoot the limit.
+   */
+  admit(keys: AdmitKeys, member: string, profile: string, max: number): Promise<AdmitResult>;
   /** Atomically replaces `key` only if it still holds `expected`. */
   cas(key: string, expected: string, next: string, exSeconds: number): Promise<boolean>;
 }
+
+export type AdmitResult = "full" | "already" | "rejoined" | "admitted";
+export type AdmitKeys = { members: string; pool: string; profiles: string };
+const ADMIT_RESULTS: Record<number, AdmitResult> = { [-1]: "full", 0: "already", 1: "rejoined", 2: "admitted" };
+
+const ADMIT_SCRIPT = `if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1 then
+  return redis.call('SADD', KEYS[2], ARGV[1])
+end
+if redis.call('SCARD', KEYS[1]) >= tonumber(ARGV[2]) then
+  return -1
+end
+redis.call('SADD', KEYS[1], ARGV[1])
+redis.call('SADD', KEYS[2], ARGV[1])
+redis.call('HSET', KEYS[3], ARGV[1], ARGV[3])
+return 2`;
 
 const CAS_SCRIPT = `if redis.call('GET', KEYS[1]) == ARGV[1] then
   redis.call('SET', KEYS[1], ARGV[2], 'EX', tonumber(ARGV[3]))
@@ -80,6 +100,10 @@ class UpstashKV implements KV {
   }
   async hdel(key: string, field: string) {
     await this.r.hdel(key, field);
+  }
+  async admit(keys: AdmitKeys, member: string, profile: string, max: number) {
+    const res = await this.r.eval(ADMIT_SCRIPT, [keys.members, keys.pool, keys.profiles], [member, String(max), profile]);
+    return ADMIT_RESULTS[Number(res)] ?? "full";
   }
   async cas(key: string, expected: string, next: string, exSeconds: number) {
     return (await this.r.eval(CAS_SCRIPT, [key], [expected, next, String(exSeconds)])) === 1;
@@ -170,6 +194,21 @@ class MemoryKV implements KV {
   }
   async hdel(key: string, field: string) {
     this.hashOf(key)?.delete(field);
+  }
+  async admit(keys: AdmitKeys, member: string, profile: string, max: number): Promise<AdmitResult> {
+    // Synchronous body: nothing can interleave, same guarantee as the Lua script.
+    const members = this.setOf(keys.members, true);
+    const pool = this.setOf(keys.pool, true);
+    if (members.has(member)) {
+      if (pool.has(member)) return "already";
+      pool.add(member);
+      return "rejoined";
+    }
+    if (members.size >= max) return "full";
+    members.add(member);
+    pool.add(member);
+    this.hashOf(keys.profiles, true)!.set(member, profile);
+    return "admitted";
   }
   async cas(key: string, expected: string, next: string, exSeconds: number) {
     if ((await this.get(key)) !== expected) return false;

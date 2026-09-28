@@ -8,12 +8,13 @@ import type { MeState, RoomState } from "@/lib/types";
  * Live room state: initial server snapshot + realtime pushes. Pushes can arrive out of order
  * (or a CDN-cached refetch can be stale), so anything with an older `version` is dropped.
  * `token` authorizes the realtime socket; `pollMs` is for the host only, to keep the lobby count
- * exact between throttled broadcasts.
+ * exact between throttled broadcasts. `live: false` skips the socket entirely (a viewer standing
+ * outside a full room doesn't need, or pay for, every update).
  */
 export function useRoomState(
   code: string,
   initial: RoomState | null,
-  { token = null, pollMs }: { token?: string | null; pollMs?: number } = {},
+  { token = null, pollMs, live = true }: { token?: string | null; pollMs?: number; live?: boolean } = {},
 ) {
   const [state, setState] = useState<RoomState | null>(initial);
   const [notFound, setNotFound] = useState(!initial);
@@ -33,7 +34,10 @@ export function useRoomState(
 
   // A closed room never changes again, so drop the socket/polling instead of idling on it.
   const closed = state?.phase === "closed";
-  useEffect(() => (closed ? undefined : subscribeRoom(code, token, apply, refresh)), [code, token, apply, refresh, closed]);
+  useEffect(
+    () => (closed || !live ? undefined : subscribeRoom(code, token, apply, refresh)),
+    [code, token, apply, refresh, closed, live],
+  );
 
   useEffect(() => {
     if (!pollMs || closed) return;

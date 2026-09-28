@@ -1,10 +1,20 @@
 import { NextResponse } from "next/server";
 import { enforceLimit, handler, requireUser, roomCode, type CodeParams } from "@/lib/server/api";
-import { closeRoom, finishRound, pickPlayer, revealRound, RoomError, skipPlayer } from "@/lib/server/rooms";
+import {
+  closeRoom,
+  finishRound,
+  pickPlayer,
+  revealRound,
+  RoomError,
+  setLobbyLocked,
+  setMaxPlayers,
+  skipPlayer,
+} from "@/lib/server/rooms";
 
 type Body =
-  | { action: "pick" | "skip" | "ban" | "reveal" | "close" }
-  | { action: "finish"; verdict: "nailed" | "failed" };
+  | { action: "pick" | "skip" | "ban" | "reveal" | "close" | "lock" | "unlock" }
+  | { action: "finish"; verdict: "nailed" | "failed" }
+  | { action: "setMax"; maxPlayers: number };
 
 export const POST = handler(async (req, ctx: CodeParams) => {
   const code = await roomCode(ctx);
@@ -23,6 +33,11 @@ export const POST = handler(async (req, ctx: CodeParams) => {
     case "finish":
       if (body.verdict !== "nailed" && body.verdict !== "failed") throw new RoomError(400, "err.invalidVerdict");
       return NextResponse.json(await finishRound(code, user.id, body.verdict));
+    case "lock":
+    case "unlock":
+      return NextResponse.json(await setLobbyLocked(code, user.id, body.action === "lock"));
+    case "setMax":
+      return NextResponse.json(await setMaxPlayers(code, user.id, body.maxPlayers));
     case "close":
       return NextResponse.json(await closeRoom(code, user.id));
     default:

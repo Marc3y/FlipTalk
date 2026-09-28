@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getAudioContext } from "@/lib/audio";
+import { getAudioContext, getOutput } from "@/lib/audio";
 
 /**
  * Plays AudioBuffers through an analyser (for visualizers). Only one sound plays at a time;
@@ -30,7 +30,7 @@ export function useAudioPlayback() {
       const ctx = getAudioContext();
       const node = ctx.createAnalyser();
       node.fftSize = 256;
-      node.connect(ctx.destination);
+      node.connect(getOutput());
       const source = ctx.createBufferSource();
       source.buffer = buffer;
       source.connect(node);

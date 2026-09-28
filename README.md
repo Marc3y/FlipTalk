@@ -27,7 +27,7 @@ Open http://localhost:3000. With no keys configured, the app switches to local f
 **Playing a full round on one machine**
 
 1. Normal window → **Host a room** → sign in as `streamer` → **Create room**.
-2. Private/incognito window (separate cookies) → `/play` → enter the code → sign in as `viewer1` → **Join lobby**.
+2. On the host page click **Copy link** (the link is hidden on screen by default). Open it in a private/incognito window (separate cookies) → sign in as `viewer1` → allow the microphone. The viewer is now in the lobby automatically, with no join button.
 3. Host clicks **Pick player** → the viewer window records → **Send to stream**.
 4. The viewer hears a chime (and the phone vibrates) when picked, records, and taps **Send to stream**.
 5. The host goes through four steps (**Listen reversed** → **Imitate** → **Flip back** → **Compare**), then **Nailed it / Failed**. Nothing advances on its own: each step's big button can be used as often as you like (listen again, re-record, replay the flip-back), and **Next** moves on once the step has been done at least once. **Back** and the step tabs jump back without losing progress.
@@ -78,14 +78,13 @@ The Workers **Free** plan is enough; SQLite-backed Durable Objects are available
 
 No code changes are needed. In production, the mock provider is never registered and the mock sign-in action refuses to run, so Twitch is the only way in. If Redis is missing in production, the server logs a warning: the in-memory store only works on a single long-lived server, not across serverless instances. Without the party keys, production falls back to polling a CDN-cached endpoint every 2.5 s. That works, but only makes sense for small streams, because every poll counts as a Vercel edge request.
 
-**OBS setup:** capture the host page (window capture) and route the browser's audio to the stream. For a lighter layout, add **OBS overlay URL** (copy button on the host page, `/overlay/<CODE>`) as a Browser Source. Its background is transparent.
 
 ---
 
 ## How it scales to 2,000+ viewers per lobby
 
 ```
- viewers (2,000+ phones)          streamer / OBS
+ viewers (2,000+ phones)          streamer
    │  ▲ WebSocket (read-only)        │ HTTPS: pick, skip, reveal…
    │  │                              ▼
    │  └──── Cloudflare Durable Object ◀── POST new state ── Vercel functions ── Upstash Redis
@@ -120,9 +119,19 @@ Notes: Vercel's Hobby plan is for non-commercial use, so a monetized channel may
 
 ## Languages
 
-German is the default, English is available. The small **DE | EN** toggle (landing page and host header, bottom of the viewer page) stores the choice in a `lang` cookie, so pages are rendered on the server in the right language without a flash. API error messages follow the same cookie and also return a stable `code` (e.g. `err.banned`) that the client branches on. The OBS overlay can't see the streamer's cookies, so the host's **OBS overlay URL** button appends `?lang=de|en`.
+German is the default, English is available. The small **DE | EN** toggle (landing page and host header, bottom of the viewer page) stores the choice in a `lang` cookie, so pages are rendered on the server in the right language without a flash. API error messages follow the same cookie and also return a stable `code` (e.g. `err.banned`) that the client branches on.
 
 All texts live in [`src/lib/i18n/messages.ts`](src/lib/i18n/messages.ts). The English dictionary is typed against the German one, so a missing key fails the typecheck.
+
+## Host and viewer features
+
+- **Room link hidden by default.** The host page masks the link so it can't be read off the stream. **Copy link** (or clicking the link once it's shown) copies `…/play/<CODE>`, so viewers never type a code.
+- **Auto-join.** A signed-in viewer is put into the lobby as soon as the page loads, once microphone access is confirmed. No join button to miss. Viewers who leave on purpose or already had their turn get a button to come back instead of being pulled in again.
+- **Microphone required.** Before joining, the browser must grant microphone access. If it was granted before, the mic isn't even opened; otherwise it's opened once to trigger the prompt and released immediately. Blocked or missing microphones (e.g. some in-app browsers) never enter the pool, so picks can't land on people who can't record. The server rejects joins without this confirmation.
+- **Only present viewers get picked.** At pick time the worker reports who has the page open. Viewers who joined and closed the tab stay in the lobby but are skipped until they come back.
+- **Player limit per room** (1–50, default 25, set when creating the room and adjustable with −/+ on the host page). The first viewers to join get a slot and keep it, including after their turn, until they leave or are banned. Admission is a single atomic Redis script (check the limit, add to members and lobby, store the profile), so even 2,000 simultaneous joins can't overshoot it. A full room is deliberately cheap: signed-out visitors see “Room full” before the Twitch login (no OAuth round trip), and signed-in viewers without a slot open **no WebSocket** and send no join. They get a “Check again” button that makes one CDN-cached request.
+- **Close the lobby.** **Close lobby** stops new people from joining; the current round and everyone already in the lobby carry on. Waiting viewers rejoin automatically when it reopens, spread over 3 s so the reopen isn't a spike. **End room** ends the game for everyone.
+- **Volume.** A slider on the host and viewer pages controls everything the app plays (clips, attempts, chimes). The default is 60%, remembered per device.
 
 ## Security and abuse protection
 
@@ -144,7 +153,6 @@ src/
 │  ├─ page.tsx                     Landing
 │  ├─ host/ , host/[code]/         Create room · streamer view
 │  ├─ play/ , play/[code]/         Enter code · viewer (mobile) view
-│  ├─ overlay/[code]/              Transparent OBS browser source
 │  ├─ actions.ts                   Sign-in / sign-out server actions
 │  └─ api/
 │     ├─ auth/[...nextauth]/

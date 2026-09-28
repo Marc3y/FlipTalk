@@ -27,7 +27,7 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 
-/* Ambient neon glow behind every page (not the OBS overlay). */
+/* Ambient neon glow behind every page. */
 .app-bg {
   background:
     radial-gradient(60rem 40rem at 10% -10%, rgb(145 70 255 / 0.22), transparent 60%),
@@ -57,9 +57,4 @@ body {
   box-shadow:
     0 0 0 1px rgb(192 132 252 / 0.4),
     0 0 40px -6px rgb(168 85 247 / 0.7);
-}
-
-/* OBS browser source: let the stream show through. */
-body:has(.obs-overlay) {
-  background: transparent;
 }

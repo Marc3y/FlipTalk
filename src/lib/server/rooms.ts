@@ -1,7 +1,9 @@
 import "server-only";
 import { after } from "next/server";
 import {
+  clampMaxPlayers,
   CLIP_SAMPLE_RATE,
+  DEFAULT_MAX_PLAYERS,
   MAX_CLIP_SECONDS,
   MAX_UPLOAD_BYTES,
   MIN_CLIP_SECONDS,
@@ -19,11 +21,13 @@ const CLIP_TTL = 60 * 15;
 /** At most one lobby-count broadcast per window, however fast people join. */
 const COUNT_BROADCAST_MS = 2000;
 
-type StoredRoom = Omit<RoomState, "playerCount">;
+type StoredRoom = Omit<RoomState, "playerCount" | "memberCount">;
 
 const keys = {
   room: (c: string) => `room:${c}`,
   pool: (c: string) => `room:${c}:pool`,
+  /** Everyone holding a slot (pool ⊆ members). Capped at the room's maxPlayers. */
+  members: (c: string) => `room:${c}:members`,
   profiles: (c: string) => `room:${c}:profiles`,
   banned: (c: string) => `room:${c}:banned`,
   countLock: (c: string) => `room:${c}:countlock`,
@@ -53,7 +57,8 @@ async function readRoom(code: string): Promise<{ raw: string; room: StoredRoom }
 }
 
 async function withCount(room: StoredRoom): Promise<RoomState> {
-  return { ...room, playerCount: await kv.scard(keys.pool(room.code)) };
+  const [playerCount, memberCount] = await Promise.all([kv.scard(keys.pool(room.code)), kv.scard(keys.members(room.code))]);
+  return { ...room, maxPlayers: room.maxPlayers ?? DEFAULT_MAX_PLAYERS, playerCount, memberCount };
 }
 
 async function broadcast(room: StoredRoom) {
@@ -83,7 +88,7 @@ async function requireHost(code: string, userId: string) {
   return current.room;
 }
 
-export async function createRoom(host: PublicPlayer): Promise<RoomState> {
+export async function createRoom(host: PublicPlayer, maxPlayers: number): Promise<RoomState> {
   for (let attempt = 0; attempt < 10; attempt++) {
     const code = randomId(ROOM_CODE_LENGTH, ROOM_CODE_ALPHABET);
     const room: StoredRoom = {
@@ -92,6 +97,8 @@ export async function createRoom(host: PublicPlayer): Promise<RoomState> {
       phase: "lobby",
       version: 1,
       round: 0,
+      locked: false,
+      maxPlayers: clampMaxPlayers(maxPlayers),
       picked: null,
       pickedAt: null,
       clipId: null,
@@ -99,7 +106,7 @@ export async function createRoom(host: PublicPlayer): Promise<RoomState> {
       updatedAt: Date.now(),
     };
     if (await kv.set(keys.room(code), JSON.stringify(room), { ex: ROOM_TTL, nx: true })) {
-      return { ...room, playerCount: 0 };
+      return { ...room, playerCount: 0, memberCount: 0 };
     }
   }
   throw new RoomError(503, "err.codeAlloc");
@@ -113,19 +120,25 @@ export async function getRoomState(code: string): Promise<RoomState | null> {
 /** Pass `room` when the caller already loaded it, to save a Redis read per page view. */
 export async function getMe(code: string, user: PublicPlayer | null, room?: RoomState | null): Promise<MeState> {
   const host = room ? room.host : (await readRoom(code))?.room.host;
-  if (!user || !host) return { user, isHost: false, joined: false, banned: false };
-  const [joined, banned] = await Promise.all([
+  if (!user || !host) return { user, isHost: false, joined: false, member: false, banned: false };
+  const [joined, member, banned] = await Promise.all([
     kv.sismember(keys.pool(code), user.id),
+    kv.sismember(keys.members(code), user.id),
     kv.sismember(keys.banned(code), user.id),
   ]);
-  return { user, isHost: host.id === user.id, joined, banned };
+  return { user, isHost: host.id === user.id, joined, member, banned };
 }
 
 async function broadcastCount(code: string) {
   const current = await readRoom(code);
   if (!current) return;
   // Lobby keys get their TTL refreshed here (at most every 2 s) instead of on every join.
-  await Promise.all([kv.expire(keys.pool(code), ROOM_TTL), kv.expire(keys.profiles(code), ROOM_TTL), broadcast(current.room)]);
+  await Promise.all([
+    kv.expire(keys.pool(code), ROOM_TTL),
+    kv.expire(keys.members(code), ROOM_TTL),
+    kv.expire(keys.profiles(code), ROOM_TTL),
+    broadcast(current.room),
+  ]);
 }
 
 /**
@@ -145,18 +158,38 @@ async function broadcastCountThrottled(code: string) {
   }
 }
 
-export async function joinRoom(code: string, user: PublicPlayer) {
+/**
+ * `micReady` is the client's word that microphone access was granted. It can't be proven server-side,
+ * but it keeps anyone whose browser refused (or has no mic) out of the pool, so picks don't land on
+ * people who can't record.
+ *
+ * Slots: the first `maxPlayers` people get one and keep it (also after their turn) until they leave
+ * or are banned. Admission is one atomic script, so a crowd can't overshoot the limit. A closed lobby
+ * admits nobody new, but existing members can still get back into the pool.
+ */
+export async function joinRoom(code: string, user: PublicPlayer, micReady: boolean) {
+  if (!micReady) throw new RoomError(400, "err.micRequired");
   const [current, banned] = await Promise.all([readRoom(code), kv.sismember(keys.banned(code), user.id)]);
   if (!current || current.room.phase === "closed") throw new RoomError(404, "err.notFound");
   if (current.room.host.id === user.id) throw new RoomError(400, "err.youHost");
   if (banned) throw new RoomError(403, "err.banned");
 
-  const [, added] = await Promise.all([kv.hset(keys.profiles(code), user.id, JSON.stringify(user)), kv.sadd(keys.pool(code), user.id)]);
-  if (added) await broadcastCountThrottled(code);
+  const { room } = current;
+  const max = room.locked ? 0 : (room.maxPlayers ?? DEFAULT_MAX_PLAYERS);
+  const result = await kv.admit(
+    { members: keys.members(code), pool: keys.pool(code), profiles: keys.profiles(code) },
+    user.id,
+    JSON.stringify(user),
+    max,
+  );
+  if (result === "full") throw new RoomError(403, room.locked ? "err.lobbyLocked" : "err.roomFull");
+  if (result !== "already") await broadcastCountThrottled(code);
 }
 
+/** Leaving gives the slot back, so someone waiting outside a full room can take it. */
 export async function leaveRoom(code: string, userId: string) {
-  if (await kv.srem(keys.pool(code), userId)) await broadcastCountThrottled(code);
+  const [inPool, wasMember] = await Promise.all([kv.srem(keys.pool(code), userId), kv.srem(keys.members(code), userId)]);
+  if (inPool || wasMember) await broadcastCountThrottled(code);
 }
 
 export async function pickPlayer(code: string, hostId: string) {
@@ -207,11 +240,27 @@ async function claimPresentPlayer(code: string): Promise<string> {
 export async function skipPlayer(code: string, hostId: string, ban: boolean) {
   const room = await requireHost(code, hostId);
   if (ban && room.picked) {
-    await Promise.all([kv.sadd(keys.banned(code), room.picked.id), kv.srem(keys.pool(code), room.picked.id)]);
+    await Promise.all([
+      kv.sadd(keys.banned(code), room.picked.id),
+      kv.srem(keys.pool(code), room.picked.id),
+      kv.srem(keys.members(code), room.picked.id), // a banned viewer frees their slot
+    ]);
     await kv.expire(keys.banned(code), ROOM_TTL);
   }
   if (room.clipId) await kv.del(keys.clip(code, room.clipId));
   return mutateRoom(code, (r) => ({ ...r, phase: "lobby", picked: null, pickedAt: null, clipId: null }));
+}
+
+/** Close or reopen the lobby to newcomers. The round in progress is unaffected. */
+export async function setLobbyLocked(code: string, hostId: string, locked: boolean) {
+  await requireHost(code, hostId);
+  return mutateRoom(code, (r) => ({ ...r, locked }));
+}
+
+/** Change the number of slots. Lowering it below the current members kicks nobody; it only stops new admissions. */
+export async function setMaxPlayers(code: string, hostId: string, maxPlayers: number) {
+  await requireHost(code, hostId);
+  return mutateRoom(code, (r) => ({ ...r, maxPlayers: clampMaxPlayers(maxPlayers) }));
 }
 
 export async function revealRound(code: string, hostId: string) {
@@ -241,7 +290,7 @@ export async function finishRound(code: string, hostId: string, verdict: Verdict
 export async function closeRoom(code: string, hostId: string) {
   await requireHost(code, hostId);
   const state = await mutateRoom(code, (r) => ({ ...r, phase: "closed", picked: null, clipId: null }));
-  await kv.del(keys.pool(code), keys.profiles(code));
+  await kv.del(keys.pool(code), keys.members(code), keys.profiles(code));
   return state;
 }
 
@@ -287,13 +336,15 @@ export async function getClip(code: string, clipId: string, userId: string): Pro
   return data ? new Uint8Array(Buffer.from(data, "base64")) : null;
 }
 
-/** Dev helper: fills the lobby with fake viewers to test counts and picking. */
+/** Dev helper: fills free slots with fake viewers to test counts and picking. */
 export async function seedPlayers(code: string, count: number) {
+  const current = await readRoom(code);
+  if (!current) return;
+  const max = current.room.maxPlayers ?? DEFAULT_MAX_PLAYERS;
+  const k = { members: keys.members(code), pool: keys.pool(code), profiles: keys.profiles(code) };
   for (let i = 0; i < count; i++) {
     const id = `bot:${randomId(6, "abcdefghijklmnopqrstuvwxyz0123456789")}`;
-    await kv.hset(keys.profiles(code), id, JSON.stringify({ id, name: `bot_${id.slice(4)}`, image: null }));
-    await kv.sadd(keys.pool(code), id);
+    if ((await kv.admit(k, id, JSON.stringify({ id, name: `bot_${id.slice(4)}`, image: null }), max)) === "full") break;
   }
-  const current = await readRoom(code);
-  if (current) await broadcast(current.room);
+  await broadcast(current.room);
 }

@@ -1,19 +1,10 @@
 "use client";
 import { AnimatePresence, motion } from "framer-motion";
-import {
-  Ban,
-  Bot,
-  Check,
-  Copy,
-  MonitorPlay,
-  Power,
-  Shuffle,
-  SkipForward,
-  Users,
-} from "lucide-react";
+import { Ban, Bot, Check, Copy, Eye, EyeOff, Lock, LockOpen, Minus, Plus, Power, Shuffle, SkipForward, Users } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { LanguageSwitch } from "@/components/LanguageSwitch";
+import { VolumeControl } from "@/components/VolumeControl";
 import { Avatar } from "@/components/ui/Avatar";
 import { Button } from "@/components/ui/Button";
 import { Logo } from "@/components/ui/Logo";
@@ -21,6 +12,7 @@ import { Visualizer } from "@/components/Visualizer";
 import { useAudioPlayback } from "@/hooks/useAudioPlayback";
 import { useRoomState } from "@/hooks/useRoom";
 import { api } from "@/lib/api-client";
+import { DEFAULT_MAX_PLAYERS, MAX_PLAYERS_LIMIT } from "@/lib/constants";
 import { decodeAudio, getAudioContext } from "@/lib/audio";
 import { useI18n } from "@/lib/i18n/client";
 import { playChime } from "@/lib/sounds";
@@ -29,13 +21,13 @@ import { LastResult } from "../LastResult";
 import { SecondsSince } from "../SecondsSince";
 import { GuidedRound } from "./GuidedRound";
 
-type HostAction = "pick" | "skip" | "ban" | "reveal" | "close" | "finish";
+type HostAction = "pick" | "skip" | "ban" | "reveal" | "close" | "finish" | "lock" | "unlock" | "setMax";
 
 export function HostView({ initial, token, devTools }: { initial: RoomState; token: string | null; devTools: boolean }) {
   const code = initial.code;
   const { state, apply } = useRoomState(code, initial, { token, pollMs: 5000 });
   const room = state ?? initial;
-  const { t, fmt, lang } = useI18n();
+  const { t, fmt } = useI18n();
 
   const playback = useAudioPlayback();
   const [original, setOriginal] = useState<AudioBuffer | null>(null);
@@ -70,7 +62,7 @@ export function HostView({ initial, token, devTools }: { initial: RoomState; tok
   }, [code, room.clipId, stopAudio]);
 
   const act = useCallback(
-    async (action: HostAction, extra?: { verdict: Verdict }) => {
+    async (action: HostAction, extra?: { verdict: Verdict } | { maxPlayers: number }) => {
       getAudioContext(); // unlock audio on this click, so later sounds play without a gesture
       setBusy(action);
       setError(null);
@@ -118,21 +110,30 @@ export function HostView({ initial, token, devTools }: { initial: RoomState; tok
         <header className="flex flex-wrap items-center justify-between gap-3">
           <Logo />
           <div className="flex flex-wrap items-center gap-2">
+            <VolumeControl />
             <LanguageSwitch />
-            {/* OBS has its own cookies, so the overlay takes its language from the URL. */}
-            <CopyButton text={`/overlay/${code}?lang=${lang}`} icon={<MonitorPlay className="size-4" />} label={t("host.overlayUrl")} />
             <Button
-              variant="ghost"
+              variant={room.locked ? "primary" : "ghost"}
               size="sm"
-              onClick={() => confirm(t("host.closeConfirm")) && act("close")}
-              loading={busy === "close"}
+              onClick={() => act(room.locked ? "unlock" : "lock")}
+              loading={busy === "lock" || busy === "unlock"}
             >
-              <Power className="size-4" /> {t("host.closeRoom")}
+              {room.locked ? <LockOpen className="size-4" /> : <Lock className="size-4" />}
+              {room.locked ? t("host.unlockLobby") : t("host.lockLobby")}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => confirm(t("host.endConfirm")) && act("close")} loading={busy === "close"}>
+              <Power className="size-4" /> {t("host.endRoom")}
             </Button>
           </div>
         </header>
 
-        <RoomBanner code={code} count={room.playerCount} />
+        <RoomBanner
+          code={code}
+          members={room.memberCount}
+          maxPlayers={room.maxPlayers ?? DEFAULT_MAX_PLAYERS}
+          locked={!!room.locked}
+          onSetMax={(maxPlayers) => act("setMax", { maxPlayers })}
+        />
 
         <div className="grid flex-1 gap-5 lg:grid-cols-[1fr_320px]">
           <section className="glass relative flex min-h-[480px] flex-col overflow-hidden rounded-3xl p-6 sm:p-10">
@@ -284,52 +285,133 @@ function NoResponse({ since, onSkip, loading }: { since: number | null; onSkip: 
   );
 }
 
-function RoomBanner({ code, count }: { code: string; count: number }) {
+/**
+ * Room link for chat. Hidden by default so it isn't readable on stream; copying works either way,
+ * and the copied link already contains the code, so viewers only have to click it.
+ */
+function RoomBanner({
+  code,
+  members,
+  maxPlayers,
+  locked,
+  onSetMax,
+}: {
+  code: string;
+  members: number;
+  maxPlayers: number;
+  locked: boolean;
+  onSetMax: (n: number) => void;
+}) {
   const { t, fmt } = useI18n();
-  const [host, setHost] = useState("");
-  useEffect(() => setHost(window.location.host), []);
+  const full = members >= maxPlayers;
+  const [origin, setOrigin] = useState("");
+  const [visible, setVisible] = useState(false);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => setOrigin(window.location.origin), []);
+  const link = `${origin}/play/${code}`;
+
+  async function copy() {
+    await copyText(link);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
+
   return (
-    <div className="glass flex flex-col items-center justify-between gap-4 rounded-3xl px-6 py-5 sm:flex-row sm:px-8">
-      <div className="text-center sm:text-left">
-        <p className="text-xs font-semibold uppercase tracking-[0.3em] text-white/40">{t("host.joinAt")}</p>
-        <p className="mt-1 font-display text-2xl font-bold sm:text-3xl">{host ? `${host}/play` : "…"}</p>
+    <div className="glass flex flex-col gap-4 rounded-3xl px-6 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-8">
+      <div className="min-w-0">
+        <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.3em] text-white/40">
+          {t("host.roomLink")}
+          {locked && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-amber-400/15 px-2 py-0.5 text-[10px] tracking-wider text-amber-300">
+              <Lock className="size-3" /> {t("host.lockedBadge")}
+            </span>
+          )}
+          {full && !locked && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-amber-400/15 px-2 py-0.5 text-[10px] tracking-wider text-amber-300">
+              <Users className="size-3" /> {t("host.fullBadge")}
+            </span>
+          )}
+        </p>
+        {visible ? (
+          <button
+            type="button"
+            onClick={copy}
+            title={t("host.copyLink")}
+            className="mt-1 max-w-full truncate text-left font-display text-2xl font-bold transition hover:text-neon-300 sm:text-3xl"
+          >
+            {link.replace(/^https?:\/\//, "").replace(code, "")}
+            <span className="neon-text">{code}</span>
+          </button>
+        ) : (
+          <p className="mt-1 select-none font-display text-2xl font-bold tracking-widest text-white/25 sm:text-3xl">
+            •••••••••••••• <span className="ml-2 align-middle text-sm font-medium tracking-normal">{t("host.linkHidden")}</span>
+          </p>
+        )}
+        <p className="mt-1 text-xs text-white/40">{t("host.linkHint")}</p>
       </div>
-      <div className="flex items-center gap-6">
-        <div className="text-center">
-          <p className="text-xs font-semibold uppercase tracking-[0.3em] text-white/40">{t("host.roomCode")}</p>
-          <p className="neon-text mt-1 font-mono text-5xl font-black tracking-[0.2em] sm:text-6xl">{code}</p>
-        </div>
-        <div className="hidden h-14 w-px bg-white/10 sm:block" />
-        <div className="text-center">
-          <Users className="mx-auto size-5 text-neon-400" />
-          <motion.p key={count} initial={{ scale: 1.3 }} animate={{ scale: 1 }} className="mt-1 font-mono text-2xl font-bold tabular-nums">
-            {fmt(count)}
-          </motion.p>
+
+      <div className="flex shrink-0 items-center gap-3">
+        <Button variant="ghost" size="sm" onClick={() => setVisible((v) => !v)}>
+          {visible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+          {visible ? t("host.hide") : t("host.show")}
+        </Button>
+        <Button size="sm" onClick={copy} disabled={!origin}>
+          {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
+          {copied ? t("host.copied") : t("host.copyLink")}
+        </Button>
+        <div className="ml-2 flex flex-col items-center">
+          <p className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-widest text-white/40">
+            <Users className="size-3.5 text-neon-400" /> {t("host.players")}
+          </p>
+          <div className="mt-1 flex items-center gap-1.5">
+            <button
+              type="button"
+              aria-label={t("host.fewer")}
+              disabled={maxPlayers <= 1}
+              onClick={() => onSetMax(maxPlayers - 1)}
+              className="grid size-6 place-items-center rounded-full bg-white/5 text-white/60 transition hover:bg-white/15 hover:text-white disabled:opacity-30"
+            >
+              <Minus className="size-3.5" />
+            </button>
+            <motion.p
+              key={members}
+              initial={{ scale: 1.2 }}
+              animate={{ scale: 1 }}
+              className={`font-mono text-2xl font-bold tabular-nums ${full ? "text-amber-300" : ""}`}
+            >
+              {fmt(members)}
+              <span className="text-white/35">/{fmt(maxPlayers)}</span>
+            </motion.p>
+            <button
+              type="button"
+              aria-label={t("host.more")}
+              disabled={maxPlayers >= MAX_PLAYERS_LIMIT}
+              onClick={() => onSetMax(maxPlayers + 1)}
+              className="grid size-6 place-items-center rounded-full bg-white/5 text-white/60 transition hover:bg-white/15 hover:text-white disabled:opacity-30"
+            >
+              <Plus className="size-3.5" />
+            </button>
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-/** Copies `path` as an absolute URL on the current origin. */
-function CopyButton({ text, icon, label }: { text: string; icon: React.ReactNode; label: string }) {
-  const { t } = useI18n();
-  const [copied, setCopied] = useState(false);
-  return (
-    <Button
-      variant="ghost"
-      size="sm"
-      onClick={async () => {
-        await navigator.clipboard.writeText(new URL(text, window.location.origin).href);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      }}
-    >
-      {copied ? <Check className="size-4 text-emerald-400" /> : icon}
-      {copied ? t("host.copied") : label}
-      {!copied && <Copy className="size-3.5 opacity-50" />}
-    </Button>
-  );
+/** Clipboard API with a fallback for browsers/contexts that refuse it. */
+async function copyText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const el = document.createElement("textarea");
+    el.value = text;
+    el.style.position = "fixed";
+    el.style.opacity = "0";
+    document.body.appendChild(el);
+    el.select();
+    document.execCommand("copy");
+    el.remove();
+  }
 }
 
 function DevTools({ code }: { code: string }) {
