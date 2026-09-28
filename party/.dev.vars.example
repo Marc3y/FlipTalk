@@ -1,0 +1,2 @@
+# Copy to .dev.vars for `npm run dev`. Must match PARTY_SECRET in the Next app's .env.local.
+PARTY_SECRET=local-party-secret

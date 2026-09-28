@@ -1,0 +1,19 @@
+{
+  "name": "fliptalk-party",
+  "private": true,
+  "description": "Realtime fan-out for FlipTalk rooms: one Cloudflare Durable Object per room.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 1999",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "partyserver": "^0.5.10"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260928.1",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.143.0"
+  }
+}

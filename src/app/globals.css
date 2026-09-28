@@ -1,0 +1,65 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink-950: #07060d;
+  --color-ink-900: #0d0b17;
+  --color-ink-800: #151225;
+  --color-neon-300: #d8b4fe;
+  --color-neon-400: #c084fc;
+  --color-neon-500: #a855f7;
+  --color-neon-600: #9333ea;
+  --color-twitch: #9146ff;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+}
+
+@theme inline {
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-display: var(--font-grotesk), var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-ink-950);
+  color: #e9e6f5;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Ambient neon glow behind every page (not the OBS overlay). */
+.app-bg {
+  background:
+    radial-gradient(60rem 40rem at 10% -10%, rgb(145 70 255 / 0.22), transparent 60%),
+    radial-gradient(50rem 35rem at 110% 10%, rgb(236 72 153 / 0.12), transparent 60%),
+    radial-gradient(40rem 30rem at 50% 120%, rgb(56 189 248 / 0.08), transparent 60%),
+    var(--color-ink-950);
+}
+
+@utility glass {
+  background: rgb(255 255 255 / 0.045);
+  border: 1px solid rgb(255 255 255 / 0.09);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.06),
+    0 20px 60px -20px rgb(0 0 0 / 0.6);
+}
+
+@utility neon-text {
+  background: linear-gradient(90deg, #e9d5ff, #c084fc 45%, #f0abfc);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@utility neon-glow {
+  box-shadow:
+    0 0 0 1px rgb(192 132 252 / 0.4),
+    0 0 40px -6px rgb(168 85 247 / 0.7);
+}
+
+/* OBS browser source: let the stream show through. */
+body:has(.obs-overlay) {
+  background: transparent;
+}
