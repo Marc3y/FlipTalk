@@ -9,3 +9,7 @@ next-env.d.ts
 .vercel
 certificates
 .DS_Store
+
+# lokale KI-Notizen
+CLAUDE.md
+AGENTS.md
